@@ -1,12 +1,25 @@
-import requests
+import os
 import time
+import requests
+from bs4 import BeautifulSoup
 
-# Configurações do Telegram
-TELEGRAM_TOKEN = "8737903636:AAFAHYt9DFATprVRHgPknjmhV1_yNrxgVZc"
-CHAT_ID = "@MeusChamados_bot"
+# Configurações do Telegram e Qualitor
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8737903636:AAFAHYt9DFATprVRHgPknjmhV1_yNrxgVZc")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1700818551")
 
-# IDs já notificados para não repetir
+QUALITOR_LOGIN_URL = "https://servicedesktic.santacasaba.org.br/login.php?cdlingua=1"
+QUALITOR_CHAMADOS_URL = "https://servicedesktic.santacasaba.org.br/html/index.php?cryptget=95t112g111W114g116s97W108x95s61B84qesctjsiWHBUgHgi&idpopup=false"
+
+USUARIO = os.environ.get("QUALITOR_USER", "caio.lima")
+SENHA = os.environ.get("QUALITOR_PASS", "@caio123")
+
 chamados_notificados = set()
+
+# Sessão global para reutilizar os cookies do login
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+})
 
 def enviar_telegram(mensagem):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -16,35 +29,66 @@ def enviar_telegram(mensagem):
         "parse_mode": "Markdown"
     }
     try:
-        requests.post(url, json=payload, timeout=10)
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code != 200:
+            print(f"Erro no Telegram: {response.text}")
     except Exception as e:
         print(f"Erro ao enviar para o Telegram: {e}")
 
-def verificar_chamados():
-    # -------------------------------------------------------------
-    # Exemplo via API REST do Qualitor (caso sua empresa tenha chave/token)
-    # -------------------------------------------------------------
-    url_qualitor = "http://qualitor.suaempresa.local/api/v1/chamados"
-    headers = {"Authorization": "Bearer SEU_TOKEN_QUALITOR"}
-    
+def realizar_login():
+    payload_login = {
+        "cdusuario": USUARIO,
+        "cdsenha": SENHA,
+        "cdidiomalogin": "1"
+    }
     try:
-        response = requests.get(url_qualitor, headers=headers, timeout=10)
-        if response.status_code == 200:
-            chamados = response.json() # Ajuste conforme o JSON retornado pelo Qualitor
-            
-            for chamado in chamados:
-                chamado_id = chamado.get("cd_chamado")
-                titulo = chamado.get("ds_chamado")
-                
+        res_login = session.post(QUALITOR_LOGIN_URL, data=payload_login, timeout=15)
+        if res_login.status_code == 200:
+            print("Autenticado no Qualitor com sucesso!")
+            return True
+        else:
+            print(f"Falha na tentativa de login no Qualitor. Status: {res_login.status_code}")
+            return False
+    except Exception as e:
+        print(f"Erro ao tentar realizar login: {e}")
+        return False
+
+def monitorar_qualitor():
+    try:
+        # Acessa a página de chamados logado
+        res_chamados = session.get(QUALITOR_CHAMADOS_URL, timeout=15)
+        
+        # Se for redirecionado para a tela de login, refaz a autenticação
+        if "login.php" in res_chamados.url or "cdusuario" in res_chamados.text:
+            print("Sessão expirada. Efetuando login novamente...")
+            if not realizar_login():
+                return
+            res_chamados = session.get(QUALITOR_CHAMADOS_URL, timeout=15)
+
+        soup = BeautifulSoup(res_chamados.text, "html.parser")
+
+        # Busca pelas linhas da tabela de chamados
+        linhas_chamados = soup.find_all("tr", class_="linha_chamado") 
+
+        for linha in linhas_chamados:
+            colunas = linha.find_all("td")
+            if len(colunas) >= 2:
+                chamado_id = colunas[0].text.strip()
+                titulo = colunas[1].text.strip()
+
                 if chamado_id not in chamados_notificados:
-                    msg = f"🚨 *Novo Chamado Qualitor!*\n\n*Nº:* {chamado_id}\n*Título:* {titulo}"
+                    msg = f"🚨 *Novo Chamado no Qualitor!*\n\n*Nº:* `{chamado_id}`\n*Assunto:* {titulo}"
                     enviar_telegram(msg)
                     chamados_notificados.add(chamado_id)
-    except Exception as e:
-        print(f"Erro ao consultar o Qualitor: {e}")
 
-# Loop de monitoramento (ex: a cada 2 minutos)
+    except Exception as e:
+        print(f"Erro durante a execução do monitoramento: {e}")
+
 if __name__ == "__main__":
-    while True:
-        verificar_chamados()
-        time.sleep(120)
+    print("Iniciando serviço de monitoramento do Qualitor...")
+    if realizar_login():
+        # Envia mensagem de teste de inicialização para o Telegram
+        enviar_telegram("🤖 *Bot do Qualitor iniciado e a monitorar novos chamados!*")
+        while True:
+            monitorar_qualitor()
+            time.sleep(120)  #
